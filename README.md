@@ -12,15 +12,15 @@ A C# .NET 9 implementation of the EPAN-SERec model from the research paper:
 
 ## 📋 Table of Contents
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Paper-to-Code Mapping](#paper-to-code-mapping)
-- [Project Structure](#project-structure)
-- [Components](#components)
-- [Getting Started](#getting-started)
-- [Training Results](#training-results)
-- [API Reference](#api-reference)
-- [Testing](#testing)
+- [Overview](#-overview)
+- [Architecture](#️-architecture)
+- [Paper-to-Code Mapping](#-paper-to-code-mapping)
+- [Project Structure](#-project-structure)
+- [Components](#-components)
+- [Getting Started](#-getting-started)
+- [Training Results](#-training-results)
+- [API Reference](#-api-reference)
+- [Testing](#-testing)
 
 ## 🎯 Overview
 
