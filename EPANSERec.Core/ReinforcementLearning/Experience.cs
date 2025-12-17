@@ -2,6 +2,7 @@ namespace EPANSERec.Core.ReinforcementLearning;
 
 /// <summary>
 /// Represents a single experience tuple for replay memory.
+/// Extended to support Double DQN with next state action embeddings.
 /// </summary>
 public class Experience
 {
@@ -11,6 +12,12 @@ public class Experience
     public float[] NextState { get; set; }
     public bool Done { get; set; }
 
+    /// <summary>
+    /// Available action embeddings at the next state for Double DQN.
+    /// Each action is represented by its embedding concatenated with the next state.
+    /// </summary>
+    public List<float[]>? NextStateActionInputs { get; set; }
+
     public Experience(float[] state, int action, float reward, float[] nextState, bool done)
     {
         State = state;
@@ -18,6 +25,18 @@ public class Experience
         Reward = reward;
         NextState = nextState;
         Done = done;
+        NextStateActionInputs = null;
+    }
+
+    public Experience(float[] state, int action, float reward, float[] nextState, bool done,
+        List<float[]>? nextStateActionInputs)
+    {
+        State = state;
+        Action = action;
+        Reward = reward;
+        NextState = nextState;
+        Done = done;
+        NextStateActionInputs = nextStateActionInputs;
     }
 }
 

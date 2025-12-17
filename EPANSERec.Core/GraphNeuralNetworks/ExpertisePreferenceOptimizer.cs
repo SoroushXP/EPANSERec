@@ -48,26 +48,42 @@ public class ExpertisePreferenceOptimizer
         Dictionary<int, float[]> initialFeatures,
         int epochs = 50)
     {
+        // Handle empty preference graphs
+        if (preferenceGraph.EntityIds.Count == 0)
+        {
+            return new float[0, _embeddingDim];
+        }
+
         // Convert to tensors
         var (nodeFeatures, adjacencyMatrix, entityIdToIndex) = PrepareInputs(preferenceGraph, initialFeatures);
-        
+
+        // Handle single-node graphs (no edges to learn from)
+        if (entityIdToIndex.Count == 1)
+        {
+            using (torch.no_grad())
+            {
+                var singleNodeOutput = _gcn.forward(nodeFeatures, adjacencyMatrix);
+                return ConvertToArray(singleNodeOutput, 1);
+            }
+        }
+
         for (int epoch = 0; epoch < epochs; epoch++)
         {
             _optimizer.zero_grad();
-            
+
             // Forward pass through GCN
             var gcnOutput = _gcn.forward(nodeFeatures, adjacencyMatrix);
-            
+
             // Self-supervised loss (Equation 12)
             var sslLoss = _ssl.forward(gcnOutput, adjacencyMatrix);
-            
+
             // Total loss with SSL regularization
             var totalLoss = _sslWeight * sslLoss;
-            
+
             totalLoss.backward();
             _optimizer.step();
         }
-        
+
         // Get final embeddings
         using (torch.no_grad())
         {

@@ -66,7 +66,10 @@ public class MDPState
 
     /// <summary>
     /// Creates a pooled state representation for Q-network input.
-    /// O' = maxpool[f1; f2; ...; f(i-1)], s'i = [O'; fi]
+    /// Implements Equation 5-6 from the paper:
+    /// O_l = [f_1; f_2; ...; f_(i-1)] - concatenated embeddings of previous nodes
+    /// O'_l = sum(O_l) / n - mean pooling over previous embeddings (Equation 6)
+    /// s'_i = [O'_l; f_i] - final state representation
     /// Always returns a vector of size EmbeddingDimension * 2.
     /// </summary>
     public float[] GetPooledStateVector()
@@ -92,17 +95,21 @@ public class MDPState
         int numPreviousNodes = PathSequence.Count - 1;
         var pooledVector = new float[EmbeddingDimension];
 
-        // Max pooling over previous node embeddings
+        // Mean pooling over previous node embeddings (Equation 6: O'_l = sum(O_l) / n)
         for (int d = 0; d < EmbeddingDimension; d++)
         {
-            float maxVal = float.MinValue;
+            float sum = 0;
+            int validCount = 0;
             for (int n = 0; n < numPreviousNodes; n++)
             {
                 int idx = n * EmbeddingDimension + d;
                 if (idx < StateVector.Length - EmbeddingDimension)
-                    maxVal = Math.Max(maxVal, StateVector[idx]);
+                {
+                    sum += StateVector[idx];
+                    validCount++;
+                }
             }
-            pooledVector[d] = maxVal == float.MinValue ? 0 : maxVal;
+            pooledVector[d] = validCount > 0 ? sum / validCount : 0;
         }
 
         // Concatenate pooled vector with last node embedding [O'; fi]

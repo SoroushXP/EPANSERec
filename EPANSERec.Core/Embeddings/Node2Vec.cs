@@ -4,7 +4,19 @@ namespace EPANSERec.Core.Embeddings;
 
 /// <summary>
 /// Node2Vec implementation for learning graph structure embeddings.
-/// Uses biased random walks with BFS/DFS exploration as described in the paper.
+/// Based on: Grover, A., & Leskovec, J. (2016). "node2vec: Scalable Feature Learning for Networks." KDD.
+///
+/// Uses biased random walks with BFS/DFS exploration controlled by parameters p and q.
+/// The random walk strategy interpolates between BFS (exploring local neighborhoods) and
+/// DFS (exploring distant nodes) based on:
+/// - p (return parameter): Controls likelihood of immediately revisiting a node
+/// - q (in-out parameter): Controls search to differentiate inward vs outward nodes
+///
+/// Training uses Skip-gram with Negative Sampling (SGNS) from Word2Vec
+/// (Mikolov et al., 2013), treating node sequences as sentences.
+///
+/// Negative sampling uses noise distribution: P_n(v) ∝ d_v^0.75 (unigram distribution raised to 3/4 power)
+/// as recommended in the original Word2Vec paper for better handling of rare words/nodes.
 /// </summary>
 public class Node2Vec
 {
@@ -12,13 +24,29 @@ public class Node2Vec
     private readonly int _embeddingDimension;
     private readonly int _walkLength;
     private readonly int _numWalks;
-    private readonly double _p; // Return parameter (BFS-like if p > 1)
-    private readonly double _q; // In-out parameter (DFS-like if q > 1)
+    private readonly double _p; // Return parameter: High p (>1) = less likely to return, low p (<1) = more BFS-like
+    private readonly double _q; // In-out parameter: High q (>1) = biased toward local nodes (BFS), low q (<1) = biased toward distant nodes (DFS)
     private readonly int _windowSize;
+    private readonly int _negSamples; // Number of negative samples per positive (typically 5-20)
     private readonly Random _random;
-    
-    private Dictionary<int, float[]> _embeddings = new();
 
+    private Dictionary<int, float[]> _embeddings = new();
+    private List<int> _nodeList = new();
+    private double[] _negSamplingDistribution = Array.Empty<double>(); // Precomputed unigram^0.75 distribution
+    private double[] _cumulativeDistribution = Array.Empty<double>(); // For efficient sampling
+
+    /// <summary>
+    /// Initializes Node2Vec with configurable hyperparameters.
+    /// </summary>
+    /// <param name="graph">Knowledge graph to learn embeddings from</param>
+    /// <param name="embeddingDimension">Dimension of output embeddings (default: 100, paper uses 128)</param>
+    /// <param name="walkLength">Length of each random walk (default: 80, paper recommends 40-80)</param>
+    /// <param name="numWalks">Number of walks per node (default: 10, paper uses 10)</param>
+    /// <param name="p">Return parameter controlling BFS/DFS behavior (default: 1.0)</param>
+    /// <param name="q">In-out parameter controlling BFS/DFS behavior (default: 1.0)</param>
+    /// <param name="windowSize">Skip-gram context window size (default: 5, standard for Word2Vec)</param>
+    /// <param name="negSamples">Number of negative samples per positive (default: 5, Word2Vec recommends 5-20)</param>
+    /// <param name="seed">Random seed for reproducibility</param>
     public Node2Vec(
         SoftwareKnowledgeGraph graph,
         int embeddingDimension = 100,
@@ -27,6 +55,7 @@ public class Node2Vec
         double p = 1.0,
         double q = 1.0,
         int windowSize = 5,
+        int negSamples = 5,
         int? seed = null)
     {
         _graph = graph;
@@ -36,29 +65,43 @@ public class Node2Vec
         _p = p;
         _q = q;
         _windowSize = windowSize;
+        _negSamples = negSamples;
         _random = seed.HasValue ? new Random(seed.Value) : new Random();
     }
 
     /// <summary>
     /// Trains Node2Vec embeddings for all nodes in the graph.
+    /// Training follows the two-phase approach from the original Node2Vec paper:
+    /// 1. Generate corpus of random walks
+    /// 2. Apply Skip-gram with Negative Sampling (SGNS)
     /// </summary>
+    /// <param name="epochs">Number of training epochs over the walk corpus</param>
+    /// <param name="learningRate">Initial learning rate (decays linearly during training)</param>
     public Dictionary<int, float[]> Train(int epochs = 5, float learningRate = 0.025f)
     {
-        // Initialize embeddings randomly
+        // Initialize embeddings randomly (Xavier/Glorot-like initialization)
         InitializeEmbeddings();
-        
-        // Generate random walks
+
+        // Build negative sampling distribution (unigram^0.75)
+        BuildNegativeSamplingDistribution();
+
+        // Generate random walks (corpus construction)
         var walks = GenerateWalks();
-        
-        // Train using Skip-gram model
+
+        // Train using Skip-gram with Negative Sampling (SGNS)
         TrainSkipGram(walks, epochs, learningRate);
-        
+
         return _embeddings;
     }
 
+    /// <summary>
+    /// Initializes embeddings with small random values.
+    /// Uses uniform distribution in [-0.5/d, 0.5/d] similar to Word2Vec default.
+    /// </summary>
     private void InitializeEmbeddings()
     {
-        foreach (var entityId in _graph.Entities.Keys)
+        _nodeList = _graph.Entities.Keys.ToList();
+        foreach (var entityId in _nodeList)
         {
             var embedding = new float[_embeddingDimension];
             for (int i = 0; i < _embeddingDimension; i++)
@@ -67,6 +110,68 @@ public class Node2Vec
             }
             _embeddings[entityId] = embedding;
         }
+    }
+
+    /// <summary>
+    /// Builds the noise distribution for negative sampling.
+    /// Uses P_n(w) ∝ U(w)^0.75 where U(w) is the unigram (frequency) distribution.
+    /// The 0.75 exponent helps sample rare nodes more frequently than their
+    /// true frequency, improving embedding quality (Mikolov et al., 2013).
+    /// </summary>
+    private void BuildNegativeSamplingDistribution()
+    {
+        // Compute node degrees as proxy for frequency
+        var degrees = new Dictionary<int, int>();
+        foreach (var nodeId in _nodeList)
+        {
+            var neighbors = _graph.GetNeighbors(nodeId);
+            degrees[nodeId] = Math.Max(1, neighbors.Count); // Minimum degree of 1
+        }
+
+        // Compute unigram^0.75 distribution
+        _negSamplingDistribution = new double[_nodeList.Count];
+        double total = 0;
+
+        for (int i = 0; i < _nodeList.Count; i++)
+        {
+            // Raise degree to power 0.75 as per Word2Vec recommendation
+            _negSamplingDistribution[i] = Math.Pow(degrees[_nodeList[i]], 0.75);
+            total += _negSamplingDistribution[i];
+        }
+
+        // Normalize to probability distribution
+        for (int i = 0; i < _nodeList.Count; i++)
+        {
+            _negSamplingDistribution[i] /= total;
+        }
+
+        // Build cumulative distribution for efficient sampling
+        _cumulativeDistribution = new double[_nodeList.Count];
+        _cumulativeDistribution[0] = _negSamplingDistribution[0];
+        for (int i = 1; i < _nodeList.Count; i++)
+        {
+            _cumulativeDistribution[i] = _cumulativeDistribution[i - 1] + _negSamplingDistribution[i];
+        }
+    }
+
+    /// <summary>
+    /// Samples a node from the negative sampling distribution using binary search.
+    /// </summary>
+    private int SampleNegativeNode()
+    {
+        double r = _random.NextDouble();
+        int low = 0, high = _cumulativeDistribution.Length - 1;
+
+        while (low < high)
+        {
+            int mid = (low + high) / 2;
+            if (_cumulativeDistribution[mid] < r)
+                low = mid + 1;
+            else
+                high = mid;
+        }
+
+        return _nodeList[low];
     }
 
     /// <summary>
@@ -160,27 +265,38 @@ public class Node2Vec
     }
 
     /// <summary>
-    /// Trains embeddings using Skip-gram with negative sampling.
+    /// Trains embeddings using Skip-gram with Negative Sampling (SGNS).
+    /// Objective: maximize log σ(v_c · v_w) + Σ E[log σ(-v_n · v_w)]
+    /// where v_w is target word/node, v_c is context, v_n are negative samples.
+    ///
+    /// Linear learning rate decay is applied as in original Word2Vec implementation.
     /// </summary>
-    private void TrainSkipGram(List<List<int>> walks, int epochs, float learningRate)
+    private void TrainSkipGram(List<List<int>> walks, int epochs, float initialLearningRate)
     {
-        var nodes = _graph.Entities.Keys.ToList();
-        int negSamples = 5;
+        int totalIterations = epochs * walks.Count;
+        int currentIteration = 0;
+        float minLearningRate = initialLearningRate * 0.0001f; // Minimum LR
 
         for (int epoch = 0; epoch < epochs; epoch++)
         {
-            float totalLoss = 0;
-            int count = 0;
+            // Shuffle walks each epoch for better convergence
+            var shuffledWalks = walks.OrderBy(_ => _random.Next()).ToList();
 
-            foreach (var walk in walks)
+            foreach (var walk in shuffledWalks)
             {
+                // Linear learning rate decay
+                float progress = (float)currentIteration / totalIterations;
+                float lr = Math.Max(minLearningRate, initialLearningRate * (1.0f - progress));
+                currentIteration++;
+
                 for (int i = 0; i < walk.Count; i++)
                 {
                     var target = walk[i];
 
-                    // Context window
-                    int start = Math.Max(0, i - _windowSize);
-                    int end = Math.Min(walk.Count - 1, i + _windowSize);
+                    // Context window (dynamic window: sample from [1, windowSize])
+                    int dynamicWindow = _random.Next(1, _windowSize + 1);
+                    int start = Math.Max(0, i - dynamicWindow);
+                    int end = Math.Min(walk.Count - 1, i + dynamicWindow);
 
                     for (int j = start; j <= end; j++)
                     {
@@ -188,17 +304,17 @@ public class Node2Vec
 
                         var context = walk[j];
 
-                        // Positive sample update
-                        totalLoss += UpdateEmbeddings(target, context, true, learningRate);
-                        count++;
+                        // Positive sample update: maximize log σ(v_c · v_w)
+                        UpdateEmbeddings(target, context, true, lr);
 
-                        // Negative samples
-                        for (int k = 0; k < negSamples; k++)
+                        // Negative samples from noise distribution P_n(w) ∝ U(w)^0.75
+                        for (int k = 0; k < _negSamples; k++)
                         {
-                            var negNode = nodes[_random.Next(nodes.Count)];
+                            var negNode = SampleNegativeNode();
+                            // Skip if negative sample is the same as context or target
                             if (negNode != context && negNode != target)
                             {
-                                totalLoss += UpdateEmbeddings(target, negNode, false, learningRate);
+                                UpdateEmbeddings(target, negNode, false, lr);
                             }
                         }
                     }
@@ -208,35 +324,41 @@ public class Node2Vec
     }
 
     /// <summary>
-    /// Updates embeddings using SGD for a single pair.
+    /// Updates embeddings using Stochastic Gradient Descent for a single (target, context) pair.
+    ///
+    /// For positive pairs: gradient = (1 - σ(v_c · v_w)) * v_c (maximize similarity)
+    /// For negative pairs: gradient = -σ(v_n · v_w) * v_n (minimize similarity)
+    ///
+    /// Both target and context vectors are updated symmetrically.
     /// </summary>
-    private float UpdateEmbeddings(int target, int context, bool isPositive, float lr)
+    private void UpdateEmbeddings(int target, int context, bool isPositive, float lr)
     {
         var targetEmb = _embeddings[target];
         var contextEmb = _embeddings[context];
 
-        // Compute dot product
+        // Compute dot product: v_target · v_context
         float dot = 0;
         for (int i = 0; i < _embeddingDimension; i++)
             dot += targetEmb[i] * contextEmb[i];
 
-        // Sigmoid and gradient
-        float sigmoid = 1.0f / (1.0f + (float)Math.Exp(-dot));
-        float label = isPositive ? 1.0f : 0.0f;
-        float gradient = lr * (label - sigmoid);
+        // Clamp dot product to prevent overflow in sigmoid
+        dot = Math.Clamp(dot, -6.0f, 6.0f);
 
-        // Update embeddings
+        // Sigmoid activation: σ(x) = 1 / (1 + e^(-x))
+        float sigmoid = 1.0f / (1.0f + (float)Math.Exp(-dot));
+
+        // Gradient computation:
+        // For positive: ∂log(σ(x))/∂x = 1 - σ(x)
+        // For negative: ∂log(σ(-x))/∂x = -σ(x)
+        float gradient = lr * (isPositive ? (1.0f - sigmoid) : -sigmoid);
+
+        // Symmetric update of both embeddings
         for (int i = 0; i < _embeddingDimension; i++)
         {
             float tempTarget = targetEmb[i];
             targetEmb[i] += gradient * contextEmb[i];
             contextEmb[i] += gradient * tempTarget;
         }
-
-        // Return loss for monitoring
-        return isPositive
-            ? -(float)Math.Log(sigmoid + 1e-10)
-            : -(float)Math.Log(1 - sigmoid + 1e-10);
     }
 
     /// <summary>

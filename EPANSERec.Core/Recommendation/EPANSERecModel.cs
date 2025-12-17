@@ -11,27 +11,73 @@ namespace EPANSERec.Core.Recommendation;
 /// <summary>
 /// EPAN-SERec: Expertise Preference-Aware Networks for Software Expert Recommendations.
 /// Main model class that integrates all components from the paper.
+///
+/// Reference: Tang et al. (2024). "EPAN-SERec: Expertise preference-aware networks for
+///            software expert recommendations with knowledge graph." Expert Systems with Applications.
+///
+/// ═══════════════════════════════════════════════════════════════════════════════════════════════
+/// HYPERPARAMETER REFERENCE (from Paper Section 5.2 / Table 3)
+/// ═══════════════════════════════════════════════════════════════════════════════════════════════
+///
+/// The following hyperparameters are used in the paper's experiments on StackOverflow data:
+///
+/// **Embedding Dimensions:**
+///   - Entity/Node embedding dimension: 100 (can vary 50-200 per ablation study)
+///   - GCN hidden dimension: 256
+///
+/// **Reinforcement Learning (EPDRL):**
+///   - Max path length: 10
+///   - γ (gamma) discount factor: 0.99 (standard DRL value)
+///   - ε (epsilon) initial exploration: 1.0, decay to 0.01
+///   - Replay buffer capacity: 10,000
+///   - Batch size: 128
+///
+/// **Knowledge Graph Embedding (TransH):**
+///   - Margin for ranking loss: 1.0
+///   - Learning rate: 0.01
+///
+/// **Self-Supervised Learning:**
+///   - β (beta) SSL loss coefficient: 0.1 (Equation 19: L = L(θ) + β * L_con)
+///   - γ coefficient in SSL: 0.1 (reduces gradient conflict)
+///
+/// **Training:**
+///   - Learning rate: 1e-4 (Adam optimizer)
+///   - Epochs: 100 (early stopping based on validation)
+///   - Dropout: 0.1-0.3 depending on component
+/// ═══════════════════════════════════════════════════════════════════════════════════════════════
 /// </summary>
 public class EPANSERecModel
 {
     private readonly SoftwareKnowledgeGraph _knowledgeGraph;
     private readonly int _embeddingDim;
-    private readonly float _beta; // SSL loss coefficient
-    
+    private readonly float _beta; // SSL loss coefficient β (Equation 19: L = L(θ) + β * L_con)
+
     // Component modules
     private EPDRL? _epdrl;
     private TransH? _transH;
     private ExpertisePreferenceOptimizer? _preferenceOptimizer;
     private AttentionNetwork? _attentionNetwork;
+    private QuestionAttentionNetwork? _questionAttentionNetwork; // Self-attention for question embeddings
     private FeatureFusion? _featureFusion;
     private PredictionDNN? _predictionDNN;
+    private GraphSelfSupervisedLearning? _sslModule; // SSL module for joint training
     private torch.optim.Optimizer? _optimizer;
-    
+
     // Cached embeddings
     private Dictionary<int, float[]> _entityEmbeddings = new();
     private Dictionary<int, ExpertisePreferenceWeightGraph> _expertPreferenceGraphs = new();
     private Dictionary<int, float[]> _optimizedExpertEmbeddings = new();
 
+    // Cached adjacency matrices for SSL during training (per expert)
+    private Dictionary<int, Tensor> _expertAdjacencyMatrices = new();
+    private Dictionary<int, Tensor> _expertFeatureMatrices = new();
+
+    /// <summary>
+    /// Creates the EPAN-SERec model with configurable hyperparameters.
+    /// </summary>
+    /// <param name="knowledgeGraph">Software knowledge graph from StackOverflow or similar</param>
+    /// <param name="embeddingDim">Embedding dimension (paper default: 100, range: 50-200)</param>
+    /// <param name="beta">SSL loss coefficient β (paper default: 0.1, Equation 19)</param>
     public EPANSERecModel(SoftwareKnowledgeGraph knowledgeGraph, int embeddingDim = 100, float beta = 0.1f)
     {
         _knowledgeGraph = knowledgeGraph;
@@ -45,43 +91,50 @@ public class EPANSERecModel
     public void Initialize(float learningRate = 1e-4f)
     {
         Console.WriteLine("Initializing EPAN-SERec model components...");
-        
+
         // 1. Initialize EPDRL for expertise preference learning
-        Console.WriteLine("  - Initializing EPDRL (Deep Reinforcement Learning)...");
+        Console.WriteLine("  - Initializing EPDRL (Double DQN for Reinforcement Learning)...");
         _epdrl = new EPDRL(_knowledgeGraph, _embeddingDim);
-        
+
         // 2. Initialize TransH for knowledge graph embeddings
         Console.WriteLine("  - Initializing TransH (Knowledge Graph Embedding)...");
         int numEntities = _knowledgeGraph.Entities.Count;
         int numRelations = _knowledgeGraph.Relations.Count;
         _transH = new TransH(numEntities, numRelations, _embeddingDim);
-        
+
         // 3. Initialize GCN with self-supervised learning
         Console.WriteLine("  - Initializing Expertise Preference Optimizer (GCN + SSL)...");
         _preferenceOptimizer = new ExpertisePreferenceOptimizer(
             inputDim: _embeddingDim,
             hiddenDim: 256,
             outputDim: _embeddingDim);
-        
-        // 4. Initialize attention network
-        Console.WriteLine("  - Initializing Attention Network...");
+
+        // 4. Initialize attention networks
+        Console.WriteLine("  - Initializing Attention Networks...");
         _attentionNetwork = new AttentionNetwork(_embeddingDim);
-        
-        // 5. Initialize feature fusion
-        Console.WriteLine("  - Initializing Feature Fusion...");
+        _questionAttentionNetwork = new QuestionAttentionNetwork(_embeddingDim);
+
+        // 5. Initialize feature fusion (with gating mechanism)
+        Console.WriteLine("  - Initializing Feature Fusion (Gating)...");
         _featureFusion = new FeatureFusion(_embeddingDim);
-        
+
         // 6. Initialize prediction DNN
         Console.WriteLine("  - Initializing Prediction DNN...");
         // Input: question embedding + expert embedding
         _predictionDNN = new PredictionDNN(_embeddingDim * 2, hiddenDim: 256);
-        
-        // Combine trainable parameters
+
+        // 7. Initialize SSL module for joint training (Equation 12 & 19)
+        Console.WriteLine("  - Initializing SSL Module for Joint Training...");
+        _sslModule = new GraphSelfSupervisedLearning(_embeddingDim, gamma: _beta);
+
+        // Combine trainable parameters from all modules
         var parameters = _attentionNetwork.parameters()
+            .Concat(_questionAttentionNetwork.parameters())
             .Concat(_featureFusion.parameters())
-            .Concat(_predictionDNN.parameters());
+            .Concat(_predictionDNN.parameters())
+            .Concat(_sslModule.parameters());
         _optimizer = torch.optim.Adam(parameters, lr: learningRate);
-        
+
         Console.WriteLine("Model initialization complete.");
     }
 
@@ -104,39 +157,131 @@ public class EPANSERecModel
     public void GenerateExpertPreferenceGraphs(IEnumerable<Expert> experts, int episodes = 100)
     {
         Console.WriteLine("Generating expertise preference graphs...");
+        var expertList = experts.ToList();
+        int totalExperts = expertList.Count;
         int count = 0;
-        foreach (var expert in experts)
+        var startTime = DateTime.Now;
+        Console.Out.Flush();
+
+        // Use thread-safe dictionary for parallel execution
+        var results = new System.Collections.Concurrent.ConcurrentDictionary<int, ExpertisePreferenceWeightGraph>();
+
+        // Determine parallelism - use up to 75% of available cores
+        int maxParallelism = Math.Max(1, Environment.ProcessorCount * 3 / 4);
+        Console.WriteLine($"  Using {maxParallelism} parallel workers...");
+
+        var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxParallelism };
+
+        Parallel.ForEach(expertList, parallelOptions, expert =>
         {
-            var preferenceGraph = _epdrl!.GeneratePreferenceGraph(expert, episodes);
-            _expertPreferenceGraphs[expert.Id] = preferenceGraph;
-            count++;
-            if (count % 10 == 0)
-                Console.WriteLine($"  Processed {count} experts...");
+            // Each thread needs its own EPDRL instance for thread safety
+            var localEpdrl = new EPDRL(_knowledgeGraph, _embeddingDim);
+            var preferenceGraph = localEpdrl.GeneratePreferenceGraph(expert, episodes);
+            results[expert.Id] = preferenceGraph;
+
+            var currentCount = Interlocked.Increment(ref count);
+
+            // Progress reporting - thread-safe, less frequent to avoid console contention
+            if (currentCount == 1 || currentCount % 100 == 0 || currentCount == totalExperts)
+            {
+                var elapsed = DateTime.Now - startTime;
+                var avgTimePerExpert = elapsed.TotalSeconds / currentCount;
+                var remaining = TimeSpan.FromSeconds(avgTimePerExpert * (totalExperts - currentCount));
+                Console.WriteLine($"  Generated {currentCount}/{totalExperts} graphs ({100.0 * currentCount / totalExperts:F1}%) - ETA: {remaining:mm\\:ss}");
+                Console.Out.Flush();
+            }
+        });
+
+        // Copy results to main dictionary
+        foreach (var kvp in results)
+        {
+            _expertPreferenceGraphs[kvp.Key] = kvp.Value;
         }
+
         Console.WriteLine($"Generated {count} preference graphs.");
     }
 
     /// <summary>
     /// Optimizes expert embeddings using GCN with self-supervised learning.
+    /// Also caches adjacency and feature matrices for joint SSL training.
     /// </summary>
     public void OptimizeExpertEmbeddings(int epochs = 50)
     {
         Console.WriteLine("Optimizing expert embeddings with GCN + SSL...");
+        int totalExperts = _expertPreferenceGraphs.Count;
+        int processed = 0;
+        var startTime = DateTime.Now;
+
+        // Show initial message so user knows it's working
+        Console.WriteLine($"  Processing {totalExperts} experts ({epochs} GCN epochs each)...");
+        Console.Out.Flush();
+
         foreach (var (expertId, preferenceGraph) in _expertPreferenceGraphs)
         {
             var optimizedFeatures = _preferenceOptimizer!.OptimizeFeatures(
                 preferenceGraph, _entityEmbeddings, epochs);
-            
+
             // Store the mean of optimized features as expert embedding
             int numNodes = optimizedFeatures.GetLength(0);
             var expertEmb = new float[_embeddingDim];
-            for (int i = 0; i < numNodes; i++)
-                for (int j = 0; j < _embeddingDim; j++)
-                    expertEmb[j] += optimizedFeatures[i, j] / numNodes;
-            
+
+            if (numNodes > 0)
+            {
+                for (int i = 0; i < numNodes; i++)
+                    for (int j = 0; j < _embeddingDim; j++)
+                        expertEmb[j] += optimizedFeatures[i, j] / numNodes;
+            }
+            // else: expertEmb stays as zeros for experts with no preference graph
+
             _optimizedExpertEmbeddings[expertId] = expertEmb;
+
+            // Cache adjacency matrix and feature matrix for joint SSL training
+            CacheExpertMatrices(expertId, preferenceGraph, optimizedFeatures);
+
+            // Progress reporting - more frequent at start, then every 50
+            processed++;
+            bool shouldReport = processed == 1 || processed == 5 || processed == 10 ||
+                               processed % 50 == 0 || processed == totalExperts;
+            if (shouldReport)
+            {
+                var elapsed = DateTime.Now - startTime;
+                var avgTimePerExpert = elapsed.TotalSeconds / processed;
+                var remaining = TimeSpan.FromSeconds(avgTimePerExpert * (totalExperts - processed));
+                Console.WriteLine($"  Optimized {processed}/{totalExperts} experts ({100.0 * processed / totalExperts:F1}%) - {avgTimePerExpert:F2}s/expert - ETA: {remaining:mm\\:ss}");
+                Console.Out.Flush();
+            }
         }
         Console.WriteLine($"Optimized {_optimizedExpertEmbeddings.Count} expert embeddings.");
+        Console.WriteLine($"Cached {_expertAdjacencyMatrices.Count} adjacency matrices for joint SSL training.");
+    }
+
+    /// <summary>
+    /// Caches adjacency and feature matrices for an expert for use in joint SSL training.
+    /// </summary>
+    private void CacheExpertMatrices(int expertId, ExpertisePreferenceWeightGraph preferenceGraph, float[,] features)
+    {
+        // Get weighted adjacency matrix
+        var adjMatrix = preferenceGraph.GetWeightedAdjacencyMatrix();
+        int n = adjMatrix.GetLength(0);
+
+        if (n == 0) return;
+
+        // Convert to flat arrays for tensor creation
+        var adjArray = new float[n * n];
+        var featureArray = new float[n * _embeddingDim];
+
+        for (int i = 0; i < n; i++)
+        {
+            for (int j = 0; j < n; j++)
+                adjArray[i * n + j] = adjMatrix[i, j];
+
+            for (int j = 0; j < _embeddingDim; j++)
+                featureArray[i * _embeddingDim + j] = features[i, j];
+        }
+
+        // Store as tensors (detached, no gradient tracking for storage)
+        _expertAdjacencyMatrices[expertId] = torch.tensor(adjArray).reshape(n, n).detach();
+        _expertFeatureMatrices[expertId] = torch.tensor(featureArray).reshape(n, _embeddingDim).detach();
     }
 
     /// <summary>
@@ -179,6 +324,7 @@ public class EPANSERecModel
 
     /// <summary>
     /// Trains the model on a batch of (question, expert, label) samples.
+    /// Implements Equation 19: L = L(θ) + β * L_con (joint BCE + SSL loss).
     /// </summary>
     public float TrainBatch(List<(Question question, Expert expert, bool answered)> batch)
     {
@@ -186,6 +332,7 @@ public class EPANSERecModel
 
         var predictions = new List<Tensor>();
         var labels = new List<float>();
+        var expertIdsInBatch = new HashSet<int>();
 
         foreach (var (question, expert, answered) in batch)
         {
@@ -195,20 +342,63 @@ public class EPANSERecModel
             var pred = _predictionDNN!.forward(input);
             predictions.Add(pred);
             labels.Add(answered ? 1.0f : 0.0f);
+            expertIdsInBatch.Add(expert.Id);
         }
 
         var predTensor = torch.cat(predictions.ToArray(), dim: 0);
         var labelTensor = torch.tensor(labels.ToArray()).unsqueeze(1);
 
-        var loss = RecommendationLoss.ComputeBCELoss(predTensor, labelTensor);
-        loss.backward();
+        // Compute BCE loss (Equation 18)
+        var bceLoss = RecommendationLoss.ComputeBCELoss(predTensor, labelTensor);
+
+        // Compute SSL loss for experts in this batch (Equation 12)
+        var sslLoss = ComputeBatchSSLLoss(expertIdsInBatch);
+
+        // Joint loss: L = L(θ) + β * L_con (Equation 19)
+        // Note: _beta is already applied inside the SSL module, so we use it directly
+        var totalLoss = bceLoss + sslLoss;
+
+        totalLoss.backward();
         _optimizer.step();
 
-        return loss.item<float>();
+        return totalLoss.item<float>();
     }
 
     /// <summary>
-    /// Gets question embedding by averaging entity embeddings.
+    /// Computes the self-supervised contrastive loss for experts in the batch.
+    /// Implements L_con from Equation 12.
+    /// </summary>
+    private Tensor ComputeBatchSSLLoss(HashSet<int> expertIds)
+    {
+        var sslLosses = new List<Tensor>();
+
+        foreach (var expertId in expertIds)
+        {
+            // Check if we have cached matrices for this expert
+            if (_expertAdjacencyMatrices.TryGetValue(expertId, out var adjMatrix) &&
+                _expertFeatureMatrices.TryGetValue(expertId, out var featureMatrix))
+            {
+                // Compute SSL loss for this expert's preference graph
+                // The SSL module returns β * L_con (gamma is set to _beta)
+                var expertSslLoss = _sslModule!.forward(featureMatrix, adjMatrix);
+                sslLosses.Add(expertSslLoss);
+            }
+        }
+
+        if (sslLosses.Count == 0)
+        {
+            // Return zero loss if no SSL data available
+            return torch.tensor(0.0f);
+        }
+
+        // Average SSL loss across experts in batch
+        var stackedLosses = torch.stack(sslLosses.ToArray());
+        return stackedLosses.mean();
+    }
+
+    /// <summary>
+    /// Gets question embedding using self-attention over entity embeddings.
+    /// Uses QuestionAttentionNetwork for attention-weighted aggregation instead of simple mean pooling.
     /// </summary>
     private Tensor GetQuestionEmbedding(Question question)
     {
@@ -222,13 +412,12 @@ public class EPANSERecModel
         if (embeddings.Count == 0)
             return torch.zeros(_embeddingDim);
 
-        // Average pooling
-        var avgEmb = new float[_embeddingDim];
-        foreach (var emb in embeddings)
-            for (int i = 0; i < _embeddingDim; i++)
-                avgEmb[i] += emb[i] / embeddings.Count;
+        // Convert to tensor for attention computation
+        var embTensor = torch.tensor(embeddings.SelectMany(e => e).ToArray())
+            .reshape(embeddings.Count, _embeddingDim);
 
-        return torch.tensor(avgEmb);
+        // Use self-attention to compute question embedding
+        return _questionAttentionNetwork!.forward(embTensor);
     }
 
     /// <summary>

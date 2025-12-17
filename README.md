@@ -109,11 +109,12 @@ This section provides a detailed mapping between the research paper sections and
 |---------------|----------|---------------------|--------------|
 | MDP State | Eq. 1: `si = [f1; f2; ...; fi]` | `ReinforcementLearning/MDPState.cs` | `MDPState.StateVector` |
 | MDP Action | Eq. 2: `ai = [fi]` | `ReinforcementLearning/MDPState.cs` | `AddNode()` |
-| Reward Function | Eq. 3: `w(eij) = (1/En^d) * Ri` | `ReinforcementLearning/EPDRL.cs` | `CalculateReward()` |
-| Max Pooling | Eq. 4-5 | `ReinforcementLearning/MDPState.cs` | `GetPooledStateVector()` |
-| Q-Network | Eq. 6: `Q(si, ai) = fθ([s'i; ai])` | `ReinforcementLearning/QNetwork.cs` | `forward()` |
+| Reward Function | Eq. 3: `w(eij) = (1/e^d) * Ri` | `ReinforcementLearning/EPDRL.cs` | `AssignPathWeights()` |
+| State Concatenation | Eq. 5: `O_l = [f1; f2; ...; f(i-1)]` | `ReinforcementLearning/MDPState.cs` | `StateVector` |
+| Mean Pooling | Eq. 6: `O'_l = sum(O_l) / n` | `ReinforcementLearning/MDPState.cs` | `GetPooledStateVector()` |
+| Q-Network | Eq. 7: `Q(si, ai) = fθ([s'i; ai])` | `ReinforcementLearning/QNetwork.cs` | `forward()` |
 | Node2Vec | Graph embeddings | `Embeddings/Node2Vec.cs` | `Train()` |
-| Double DQN | Algorithm 1 | `ReinforcementLearning/EPDRL.cs` | `GeneratePreferenceGraph()` |
+| Double DQN | Algorithm 1 | `ReinforcementLearning/EPDRL.cs` | `TrainOnBatch()` |
 
 **Key Implementation Details:**
 
@@ -122,15 +123,16 @@ This section provides a detailed mapping between the research paper sections and
 public class EPDRL
 {
     // MDP components: State, Action, Path, Reward (M = (S, A, O, R))
-    private readonly QNetwork _qNetwork;        // Online Q-network
-    private readonly QNetwork _targetNetwork;   // Target Q-network (Double DQN)
+    private readonly QNetwork _policyNetwork;   // Policy Q-network (action selection)
+    private readonly QNetwork _targetNetwork;   // Target Q-network (action evaluation)
     private readonly ReplayMemory _memory;      // Experience replay buffer
 
-    // Generates expertise preference weight graph for an expert
-    public ExpertisePreferenceWeightGraph GeneratePreferenceGraph(Expert expert, int maxSteps = 50)
+    // Double DQN Training: Q_target = r + γ * Q_target(s', argmax_a Q_policy(s', a))
+    private void TrainOnBatch()
     {
-        // Implements Algorithm 1 from the paper
-        // Uses ε-greedy policy for exploration/exploitation
+        // Step 1: Use POLICY network to select best action (argmax)
+        // Step 2: Use TARGET network to evaluate that action
+        // This reduces overestimation bias compared to standard DQN
     }
 }
 ```
@@ -165,75 +167,97 @@ public class ExpertisePreferenceOptimizer : nn.Module<Tensor, Tensor, Tensor>
 
 ### Section 4.3: Expertise Preference Feature Fusion (TransH)
 
-**Paper Description:** Uses TransH knowledge graph embedding to capture semantic relationships and fuses with expertise preference features.
+**Paper Description:** Uses TransH knowledge graph embedding to capture semantic relationships and fuses with expertise preference features using a gating mechanism.
 
 | Paper Concept | Equation | Implementation File | Class/Method |
 |---------------|----------|---------------------|--------------|
 | TransH Projection | Eq. 13: `h⊥ = h - w_r^T h w_r` | `Embeddings/TransH.cs` | `ProjectToHyperplane()` |
-| TransH Score | Eq. 14: `f_r(h,t) = \|\|h⊥ + d_r - t⊥\|\|_2^2` | `Embeddings/TransH.cs` | `Score()` |
-| Feature Fusion | MLP-based fusion | `Recommendation/FeatureFusion.cs` | `forward()` |
+| TransH Score | Eq. 14: `f_r(h,t) = \|\|h⊥ + d_r - t⊥\|\|_2^2` | `Embeddings/TransH.cs` | `ScoreFunction()` |
+| Gated Feature Fusion | `g ⊙ e_pref + (1-g) ⊙ e_sem` | `Recommendation/AttentionNetwork.cs` | `FeatureFusion.forward()` |
 
 **Key Implementation Details:**
 
 ```csharp
 // TransH.cs - Knowledge Graph Embedding with Hyperplane Projections
-public class TransH : nn.Module
+public class TransH : Module
 {
-    private readonly nn.Embedding _entityEmbeddings;   // Entity vectors
-    private readonly nn.Embedding _relationEmbeddings; // Relation translation vectors
-    private readonly nn.Embedding _normalVectors;      // Hyperplane normal vectors
+    private readonly Embedding _entityEmbeddings;   // Entity vectors
+    private readonly Embedding _relationEmbeddings; // Relation translation vectors
+    private readonly Embedding _normalVectors;      // Hyperplane normal vectors
 
-    // Projects entity to relation-specific hyperplane
-    private Tensor ProjectToHyperplane(Tensor entity, Tensor normal)
+    // Projects entity to relation-specific hyperplane (Equation 13)
+    private Tensor ProjectToHyperplane(Tensor entityEmb, Tensor normalVector)
     {
-        // h⊥ = h - w_r^T h w_r (Equation 13)
-        var projection = entity - torch.sum(normal * entity, dim: -1, keepdim: true) * normal;
-        return projection;
+        // h⊥ = h - (h · w_r) * w_r
+        var dotProduct = (entityEmb * normalVector).sum(dim: -1, keepdim: true);
+        return entityEmb - dotProduct * normalVector;
+    }
+}
+
+// FeatureFusion.cs - Gating mechanism for adaptive feature fusion
+public class FeatureFusion : Module<Tensor, Tensor, Tensor>
+{
+    // g = σ(W_g · [e_pref; e_sem] + b_g)
+    // e_fused = g ⊙ e_pref + (1-g) ⊙ e_sem
+    public override Tensor forward(Tensor expertisePreferenceEmb, Tensor semanticEmb)
+    {
+        var gate = functional.sigmoid(_gateLayer.forward(concatenated));
+        return gate * prefTransformed + (1 - gate) * semTransformed;
     }
 }
 ```
 
 ### Section 4.4: Software Expert Recommendation
 
-**Paper Description:** Uses attention networks to weight historical Q&A contributions and a DNN for final prediction.
+**Paper Description:** Uses attention networks to weight historical Q&A contributions and a DNN for final prediction. Joint training with BCE + SSL loss (Equation 19).
 
 | Paper Concept | Equation | Implementation File | Class/Method |
 |---------------|----------|---------------------|--------------|
-| Attention Weights | Eq. 15: `α_i = softmax(W_a · tanh(W_q q + W_h h_i))` | `Recommendation/AttentionNetwork.cs` | `forward()` |
-| Expert Embedding | Eq. 16: `e = Σ α_i h_i` | `Recommendation/AttentionNetwork.cs` | `forward()` |
-| Prediction Input | Eq. 17: `x = [q; e]` | `Recommendation/PredictionDNN.cs` | `forward()` |
-| Hidden Layers | Eq. 18: `h = ReLU(W_h x + b_h)` | `Recommendation/PredictionDNN.cs` | `forward()` |
-| Output | Eq. 19: `ŷ = σ(W_o h + b_o)` | `Recommendation/PredictionDNN.cs` | `forward()` |
+| Question Self-Attention | Scaled dot-product | `Recommendation/AttentionNetwork.cs` | `QuestionAttentionNetwork.forward()` |
+| Expert Attention Weights | Eq. 15: `α_k = softmax(e(q') · e(q_k))` | `Recommendation/AttentionNetwork.cs` | `AttentionNetwork.forward()` |
+| Expert Embedding | Eq. 16: `e(ui) = Σ α_k · e(q_k)` | `Recommendation/AttentionNetwork.cs` | `AttentionNetwork.forward()` |
+| Prediction Input | Eq. 17: `x = [e(q'); e(ui)]` | `Recommendation/PredictionDNN.cs` | `forward()` |
+| BCE Loss | Eq. 18: `L(θ) = -Σ[y·log(ŷ) + (1-y)·log(1-ŷ)]` | `Recommendation/PredictionDNN.cs` | `RecommendationLoss.ComputeBCELoss()` |
+| Joint Loss | Eq. 19: `L = L(θ) + β·L_con` | `Recommendation/EPANSERecModel.cs` | `TrainBatch()` |
 
 **Key Implementation Details:**
 
 ```csharp
-// AttentionNetwork.cs - Attention mechanism for Q&A weighting
-public class AttentionNetwork : nn.Module<Tensor, Tensor, Tensor>
+// QuestionAttentionNetwork.cs - Self-attention for question embeddings
+public class QuestionAttentionNetwork : Module<Tensor, Tensor>
 {
-    // Computes attention-weighted expert embedding from historical Q&A
-    public override Tensor forward(Tensor questionEmbedding, Tensor historicalEmbeddings)
+    // Scaled dot-product self-attention: Attention(Q,K,V) = softmax(QK^T/√d)V
+    public override Tensor forward(Tensor entityEmbeddings)
     {
-        // Implements Equations 15-16
-        var scores = torch.tanh(_queryTransform.call(questionEmbedding) +
-                               _keyTransform.call(historicalEmbeddings));
-        var weights = torch.softmax(_attentionVector.call(scores), dim: 0);
-        return torch.sum(weights * historicalEmbeddings, dim: 0);
+        var queries = _queryLayer.forward(entityEmbeddings);
+        var keys = _keyLayer.forward(entityEmbeddings);
+        var values = _valueLayer.forward(entityEmbeddings);
+        var attentionScores = torch.matmul(queries, keys.transpose(0, 1)) / _scale;
+        var attended = torch.matmul(functional.softmax(attentionScores, dim: -1), values);
+        return attended.mean(dimensions: new long[] { 0 });
     }
 }
 
-// PredictionDNN.cs - Final prediction network
-public class PredictionDNN : nn.Module<Tensor, Tensor>
+// AttentionNetwork.cs - Attention for expert historical Q&A
+public class AttentionNetwork : Module<Tensor, Tensor, Tensor>
 {
-    // Predicts probability of expert answering question
-    public override Tensor forward(Tensor input)
+    // Computes attention-weighted expert embedding (Equations 15-16)
+    public override Tensor forward(Tensor questionEmbedding, Tensor historicalEmbeddings)
     {
-        // Implements Equations 17-19
-        var h = torch.relu(_fc1.call(input));
-        h = _dropout.call(h);
-        h = torch.relu(_fc2.call(h));
-        return torch.sigmoid(_output.call(h));
+        var dotProducts = torch.matmul(historicalEmbeddings, questionEmbedding.unsqueeze(0).transpose(0, 1));
+        var attentionWeights = functional.softmax(dotProducts, dim: 0);
+        return (historicalEmbeddings * attentionWeights).sum(dim: 0);
     }
+}
+
+// EPANSERecModel.cs - Joint BCE + SSL Training (Equation 19)
+public float TrainBatch(List<(Question, Expert, bool)> batch)
+{
+    var bceLoss = RecommendationLoss.ComputeBCELoss(predictions, labels);
+    var sslLoss = ComputeBatchSSLLoss(expertIdsInBatch);  // L_con
+    var totalLoss = bceLoss + sslLoss;  // L = L(θ) + β * L_con
+    totalLoss.backward();
+    return totalLoss.item<float>();
 }
 ```
 
@@ -333,14 +357,21 @@ The Software Knowledge Graph represents software domain knowledge with entities 
 
 ### 2. Node2Vec (Graph Embeddings)
 
-Implements biased random walks for learning graph structure embeddings.
+Implements biased random walks for learning graph structure embeddings, based on Grover & Leskovec (2016).
+
+**Key Features:**
+- Biased random walks with configurable BFS/DFS exploration via `p` and `q` parameters
+- Skip-gram with Negative Sampling (SGNS) using proper **unigram^0.75 distribution**
+- Linear learning rate decay during training
+- Dynamic context window sampling
 
 **Parameters:**
-- `walkLength`: Length of random walks (default: 80)
+- `walkLength`: Length of random walks (default: 80, paper recommends 40-80)
 - `numWalks`: Number of walks per node (default: 10)
-- `p`: Return parameter (BFS vs DFS) (default: 1.0)
-- `q`: In-out parameter (default: 1.0)
+- `p`: Return parameter - high p (>1) = less likely to return (default: 1.0)
+- `q`: In-out parameter - high q (>1) = BFS-like, low q (<1) = DFS-like (default: 1.0)
 - `embeddingDimension`: Output dimension (default: 100)
+- `negSamples`: Negative samples per positive (default: 5, Word2Vec recommends 5-20)
 
 ### 3. TransH (Knowledge Graph Embeddings)
 
@@ -353,46 +384,78 @@ Implements translation-based embeddings with hyperplane projections.
 
 ### 4. EPDRL (Deep Reinforcement Learning)
 
-Implements Double DQN for expertise preference learning.
+Implements Double DQN for expertise preference learning (Paper Section 4.1).
 
 **MDP Definition** (M = (S, A, O, R)):
-- **S (State)**: Pooled representation of visited nodes
-- **A (Action)**: Next node to visit
-- **O (Path)**: Sequence of visited nodes
-- **R (Reward)**: Based on node relevance and expert interaction
+- **S (State)**: `s_i = [O'_l; f_i]` - pooled history + current node embedding (Eq. 5-6)
+- **A (Action)**: Next node to visit (represented by node embedding)
+- **O (Path)**: Sequence of visited nodes forming expertise preference path
+- **R (Reward)**: Shaped reward function:
+  - `+R_pos` (+1.0): Reaching target entity (expert's historical interaction)
+  - `-R_neg` (-1.0): Max path length reached without success
+  - `-R_step` (-0.01): Per-step cost to encourage shorter paths
+
+**Q-Network Architecture:**
+- 4-layer MLP: input → 256 → 256 → 128 → 1
+- ReLU activations with light dropout (0.1)
+- Follows standard DQN architecture from Mnih et al. (2015)
 
 **Hyperparameters:**
-- `gamma`: Discount factor (default: 0.99)
+- `gamma`: Discount factor (default: 0.99, standard DRL value)
 - `epsilon`: Exploration rate (default: 1.0, decays to 0.01)
 - `memoryCapacity`: Replay buffer size (default: 10000)
-- `batchSize`: Training batch size (default: 32)
+- `batchSize`: Training batch size (default: 128)
 
 ### 5. GCN with Self-Supervised Learning
 
-Implements graph convolutional networks with contrastive learning.
+Implements graph convolutional networks with **mutual information maximization** (Paper Section 4.2, Eq. 11-12).
 
 **Architecture:**
 - 2-layer GCN for feature aggregation
-- View generation via edge dropout
-- Contrastive loss for self-supervision
+- **Global MI** (default): Between node embeddings and full graph summary
+- **Hierarchical MI** (optional, for large datasets): Adds subgraph-level MI
+- Positive/negative sampling via node shuffling (DGI-style)
 
-### 6. Attention Network
+**Loss Function (Eq. 12):**
+- `L_con = -E[log(fD(h_i, s_G))] - E[log(1 - fD(h̃_j, s_G))]`
+- With hierarchical MI enabled: `L_ssl = L_global + α × L_hierarchical`
+- γ coefficient reduces gradient conflict with main task
 
-Weights historical Q&A contributions for expert representation.
+**Configuration:**
+- `useHierarchicalMI`: Enable hierarchical MI (default: `false` for small datasets, enable for large real-world data)
 
-**Mechanism:**
+### 6. Attention Networks
+
+Two attention mechanisms for question and expert representations.
+
+**Question Self-Attention (QuestionAttentionNetwork):**
+- Scaled dot-product self-attention over entity embeddings
+- Attention(Q,K,V) = softmax(QK^T/√d)V
+- Outputs rich question representation
+
+**Expert Attention (AttentionNetwork):**
 - Query: Current question embedding
 - Keys: Historical Q&A embeddings
-- Output: Weighted sum of historical embeddings
+- Output: Attention-weighted sum of historical embeddings
 
-### 7. Prediction DNN
+### 7. Feature Fusion (Gating)
 
-Final prediction network for expert-question matching.
+Adaptive fusion of expertise preference and semantic embeddings.
+
+**Gating Mechanism:**
+- Gate: `g = σ(W_g · [e_pref; e_sem] + b_g)`
+- Fusion: `e_fused = g ⊙ e_pref + (1-g) ⊙ e_sem`
+- Learns to balance contributions from each source
+
+### 8. Prediction DNN
+
+Final prediction network for expert-question matching with joint loss.
 
 **Architecture:**
 - Input: Concatenated question + expert embeddings
-- Hidden layers: 256 → 128 with ReLU + Dropout
+- Hidden layers: 256 → 128 → 64 with ReLU + BatchNorm + Dropout
 - Output: Sigmoid probability
+- **Joint Loss**: L = BCE + β × SSL (Equation 19)
 
 ## 🚀 Getting Started
 
@@ -435,9 +498,9 @@ var config = new TrainingConfig
 {
     // General settings
     Epochs = 100,              // Training epochs
-    BatchSize = 32,            // Batch size
-    LearningRate = 5e-4f,      // Learning rate
-    EmbeddingDim = 100,        // Embedding dimension
+    BatchSize = 128,           // Batch size (paper default)
+    LearningRate = 1e-4f,      // Learning rate (Adam optimizer)
+    EmbeddingDim = 100,        // Embedding dimension (paper default, range: 50-200)
 
     // Component-specific settings
     TransHEpochs = 100,        // TransH pre-training epochs
@@ -450,17 +513,59 @@ var config = new TrainingConfig
 };
 ```
 
+### Hyperparameters Reference (Paper Section 5.2 / Table 3)
+
+The following hyperparameters are used in the paper's experiments on StackOverflow data:
+
+| Component | Parameter | Default Value | Description |
+|-----------|-----------|---------------|-------------|
+| **General** | Embedding dim | 100 | Entity/node embedding dimension (range: 50-200) |
+| | Learning rate | 1e-4 | Adam optimizer learning rate |
+| | Batch size | 128 | Training batch size |
+| **EPDRL** | γ (gamma) | 0.99 | Discount factor for future rewards |
+| | ε (epsilon) | 1.0 → 0.01 | Exploration rate with decay |
+| | Max path length | 10 | Maximum steps per episode |
+| | Replay buffer | 10,000 | Experience replay capacity |
+| | R_pos | +1.0 | Reward for reaching target |
+| | R_step | -0.01 | Per-step cost |
+| **TransH** | Margin (γ) | 1.0 | Margin for ranking loss |
+| **SSL** | β (beta) | 0.1 | SSL loss coefficient (Eq. 19) |
+| | γ (gamma) | 0.1 | Gradient conflict reduction |
+| **Node2Vec** | Walk length | 80 | Random walk length |
+| | Walks/node | 10 | Number of walks per node |
+| | p, q | 1.0, 1.0 | BFS/DFS exploration parameters |
+| | Neg samples | 5 | Negative samples per positive |
+
 ## 📊 Training Results
 
 ### Current Implementation Results (Synthetic Data)
 
 | Metric | Value | Paper Target |
 |--------|-------|--------------|
-| AUC | 73.57% | 84.32% |
-| Accuracy | 68.00% | 77.68% |
-| F1 Score | 67.79% | 78.11% |
+| Best AUC | 72.01% | 84.32% |
+| Final AUC | 70.80% | 84.32% |
+| Final Accuracy | 66.33% | 77.68% |
+| Final F1 Score | 63.27% | 78.11% |
 
-*Note: Results are from synthetic data. Real StackOverflow data should yield results closer to paper targets.*
+*Note: Results are from synthetic data with a small knowledge graph (28 entities, 85 triples). Real StackOverflow data should yield results closer to paper targets.*
+
+### Implementation Features
+
+This implementation includes all key components from the paper with accurate algorithm implementations:
+
+**Core Components:**
+- ✅ **Double DQN** for EPDRL (proper action selection/evaluation separation)
+- ✅ **Mean Pooling** for MDP state representation (Equation 5-6)
+- ✅ **Gating Mechanism** for feature fusion (adaptive weighting)
+- ✅ **Self-Attention** for question embeddings (richer representations)
+- ✅ **Joint BCE + SSL Loss** training (Equation 19: L = L(θ) + β × L_con)
+
+**Algorithm Accuracy:**
+- ✅ **Node2Vec** with proper unigram^0.75 negative sampling distribution (Mikolov et al., 2013)
+- ✅ **Hierarchical SSL** with two-level mutual information (global + subgraph)
+- ✅ **TransH** hyperplane projection (Eq. 13-14) with margin-based ranking loss
+- ✅ **Shaped reward function** with step penalties for path efficiency
+- ✅ **Paper-aligned hyperparameters** documented from Section 5.2/Table 3
 
 ### Paper Results (Table 4)
 

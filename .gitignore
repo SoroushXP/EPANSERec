@@ -141,12 +141,15 @@ checkpoints/
 *.csv
 *.json
 !appsettings.json
+!data/**/*.json
 *.xml
 !*.csproj
 !*.props
 !*.targets
-data/
 datasets/
+
+# Include data folder for StackOverflow dataset
+!data/
 
 # Temporary files
 *.bak

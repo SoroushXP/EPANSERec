@@ -71,20 +71,25 @@ public class TrainingPipeline
         // Calculate class balance
         int positives = trainSet.Count(s => s.answered);
         int negatives = trainSet.Count - positives;
+        int totalBatches = (trainSet.Count + _config.BatchSize - 1) / _config.BatchSize;
         Console.WriteLine($"  Training samples: {trainSet.Count} ({positives} pos, {negatives} neg), Validation samples: {valSet.Count}");
+        Console.WriteLine($"  Batches per epoch: {totalBatches}");
 
         float bestAuc = 0;
         int patienceCounter = 0;
-        
+        var trainingStartTime = DateTime.Now;
+
         for (int epoch = 0; epoch < _config.Epochs; epoch++)
         {
+            var epochStartTime = DateTime.Now;
+
             // Shuffle training data
             trainSet = trainSet.OrderBy(_ => _random.Next()).ToList();
-            
+
             // Train batches
             float epochLoss = 0;
             int numBatches = 0;
-            
+
             for (int i = 0; i < trainSet.Count; i += _config.BatchSize)
             {
                 var batch = trainSet.Skip(i).Take(_config.BatchSize).ToList();
@@ -92,23 +97,23 @@ public class TrainingPipeline
                 epochLoss += batchLoss;
                 numBatches++;
             }
-            
+
             epochLoss /= numBatches;
             result.TrainingLosses.Add(epochLoss);
-            
+
             // Validate
             if (valSet.Count > 0)
             {
                 var (auc, acc, f1) = _model.Evaluate(valSet);
                 result.ValidationMetrics.Add((auc, acc, f1));
-                
-                // Early stopping based on AUC improvement
+
+                // Track best AUC and early stopping (if enabled)
                 if (auc > bestAuc)
                 {
                     bestAuc = auc;
                     patienceCounter = 0;
                 }
-                else
+                else if (_config.EarlyStoppingPatience > 0)  // Only apply early stopping if patience > 0
                 {
                     patienceCounter++;
                     if (patienceCounter >= _config.EarlyStoppingPatience)
@@ -117,10 +122,18 @@ public class TrainingPipeline
                         break;
                     }
                 }
-                
-                if ((epoch + 1) % 5 == 0)
+
+                // Report progress every epoch for large datasets, every 5 epochs otherwise
+                int reportInterval = trainSet.Count > 10000 ? 1 : 5;
+                if ((epoch + 1) % reportInterval == 0 || epoch == 0)
                 {
-                    Console.WriteLine($"  Epoch {epoch + 1}: Loss={epochLoss:F4}, AUC={auc:F4}, ACC={acc:F4}, F1={f1:F4}");
+                    var epochTime = DateTime.Now - epochStartTime;
+                    var totalElapsed = DateTime.Now - trainingStartTime;
+                    var avgEpochTime = totalElapsed.TotalSeconds / (epoch + 1);
+                    var remainingEpochs = _config.Epochs - epoch - 1;
+                    var eta = TimeSpan.FromSeconds(avgEpochTime * remainingEpochs);
+
+                    Console.WriteLine($"  Epoch {epoch + 1}/{_config.Epochs}: Loss={epochLoss:F4}, AUC={auc:F4}, ACC={acc:F4}, F1={f1:F4} ({epochTime.TotalSeconds:F1}s/epoch, ETA: {eta:mm\\:ss})");
                 }
             }
         }
@@ -139,6 +152,54 @@ public class TrainingPipeline
 /// </summary>
 public class TrainingConfig
 {
+    // === Data Source Configuration ===
+
+    /// <summary>
+    /// Whether to use real StackOverflow data (true) or synthetic data (false).
+    /// Default: false (synthetic data for testing)
+    /// </summary>
+    public bool UseRealData { get; set; } = false;
+
+    /// <summary>
+    /// Path to the StackOverflow dataset directory (when UseRealData = true).
+    /// Expected structure: {DataPath}/knowledge_graph/, experts.json, questions.json, samples.json
+    /// </summary>
+    public string DataPath { get; set; } = "data/stackoverflow";
+
+    /// <summary>
+    /// Number of experts to generate (synthetic data only).
+    /// </summary>
+    public int NumExperts { get; set; } = 100;
+
+    /// <summary>
+    /// Number of questions to generate (synthetic data only).
+    /// </summary>
+    public int NumQuestions { get; set; } = 500;
+
+    /// <summary>
+    /// Number of training samples to generate (synthetic data only).
+    /// </summary>
+    public int NumSamples { get; set; } = 3000;
+
+    // === Model Configuration ===
+
+    /// <summary>
+    /// Embedding dimension for all components (default: 64 for small data, 100 for large).
+    /// </summary>
+    public int EmbeddingDim { get; set; } = 64;
+
+    /// <summary>
+    /// SSL loss coefficient β (Equation 19: L = L(θ) + β * L_con).
+    /// </summary>
+    public float Beta { get; set; } = 0.1f;
+
+    /// <summary>
+    /// Enable hierarchical mutual information in SSL (recommended for large datasets only).
+    /// </summary>
+    public bool UseHierarchicalMI { get; set; } = false;
+
+    // === Training Configuration ===
+
     public int Epochs { get; set; } = 100;
     public int BatchSize { get; set; } = 128;
     public float LearningRate { get; set; } = 1e-4f;

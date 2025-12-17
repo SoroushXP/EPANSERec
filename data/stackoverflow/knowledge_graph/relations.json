@@ -1,0 +1,27 @@
+[
+  {
+    "Id": 0,
+    "Name": "related_to",
+    "Type": "RelatedTo"
+  },
+  {
+    "Id": 1,
+    "Name": "used_by",
+    "Type": "UsedBy"
+  },
+  {
+    "Id": 2,
+    "Name": "depends_on",
+    "Type": "DependsOn"
+  },
+  {
+    "Id": 3,
+    "Name": "belongs_to",
+    "Type": "BelongsTo"
+  },
+  {
+    "Id": 4,
+    "Name": "uses",
+    "Type": "Uses"
+  }
+]
