@@ -75,7 +75,7 @@ namespace EPANSERec.Core.ReinforcementLearning;
 public class EPDRL
 {
     private readonly SoftwareKnowledgeGraph _knowledgeGraph;
-    private readonly Node2Vec _node2Vec;
+    private readonly Node2Vec? _node2Vec;
     private readonly Dictionary<int, float[]> _nodeEmbeddings;
     private readonly int _embeddingDim;
     private readonly int _maxPathLength;
@@ -112,6 +112,7 @@ public class EPDRL
     /// <param name="batchSize">Experience replay batch size (default: 128)</param>
     /// <param name="memoryCapacity">Replay buffer capacity (default: 10000)</param>
     /// <param name="seed">Random seed for reproducibility</param>
+    /// <param name="pretrainedEmbeddings">Optional pre-trained node embeddings to avoid retraining Node2Vec</param>
     public EPDRL(
         SoftwareKnowledgeGraph knowledgeGraph,
         int embeddingDim = 100,
@@ -126,7 +127,8 @@ public class EPDRL
         float learningRate = 1e-4f,
         int batchSize = 128,
         int memoryCapacity = 10000,
-        int? seed = null)
+        int? seed = null,
+        Dictionary<int, float[]>? pretrainedEmbeddings = null)
     {
         _knowledgeGraph = knowledgeGraph;
         _embeddingDim = embeddingDim;
@@ -142,9 +144,17 @@ public class EPDRL
         _memoryCapacity = memoryCapacity;
         _random = seed.HasValue ? new Random(seed.Value) : new Random();
 
-        // Train Node2Vec embeddings for state/action representation
-        _node2Vec = new Node2Vec(knowledgeGraph, embeddingDim, seed: seed);
-        _nodeEmbeddings = _node2Vec.Train();
+        // Use pre-trained embeddings if provided, otherwise train Node2Vec
+        if (pretrainedEmbeddings != null)
+        {
+            _node2Vec = null;
+            _nodeEmbeddings = pretrainedEmbeddings;
+        }
+        else
+        {
+            _node2Vec = new Node2Vec(knowledgeGraph, embeddingDim, seed: seed);
+            _nodeEmbeddings = _node2Vec.Train();
+        }
 
         // Initialize Q-networks for Double DQN
         // Input: pooled state (embeddingDim * 2) + action embedding (embeddingDim) = embeddingDim * 3
@@ -156,6 +166,11 @@ public class EPDRL
         _memory = new ReplayMemory(memoryCapacity, seed);
         _optimizer = torch.optim.Adam(_policyNetwork.parameters(), lr: learningRate);
     }
+
+    /// <summary>
+    /// Gets the node embeddings (useful for sharing with other EPDRL instances).
+    /// </summary>
+    public Dictionary<int, float[]> NodeEmbeddings => _nodeEmbeddings;
 
     /// <summary>
     /// Generates the expertise preference weight graph for an expert.

@@ -153,6 +153,7 @@ public class EPANSERecModel
 
     /// <summary>
     /// Generates expertise preference graphs for all experts using EPDRL.
+    /// Uses sequential processing to avoid TorchSharp threading issues with neural networks.
     /// </summary>
     public void GenerateExpertPreferenceGraphs(IEnumerable<Expert> experts, int episodes = 100)
     {
@@ -163,39 +164,34 @@ public class EPANSERecModel
         var startTime = DateTime.Now;
         Console.Out.Flush();
 
-        // Use thread-safe dictionary for parallel execution
-        var results = new System.Collections.Concurrent.ConcurrentDictionary<int, ExpertisePreferenceWeightGraph>();
+        // Pre-train Node2Vec embeddings once on main thread to share across all experts
+        // This avoids expensive retraining and TorchSharp threading issues
+        Console.WriteLine("  Pre-training Node2Vec embeddings (one-time)...");
+        var sharedEmbeddings = _epdrl!.NodeEmbeddings;
+        Console.WriteLine($"  Loaded {sharedEmbeddings.Count} node embeddings.");
 
-        // Determine parallelism - use up to 75% of available cores
-        int maxParallelism = Math.Max(1, Environment.ProcessorCount * 3 / 4);
-        Console.WriteLine($"  Using {maxParallelism} parallel workers...");
+        // Process experts sequentially to avoid TorchSharp threading issues
+        // TorchSharp neural networks (QNetwork) can deadlock when created/used in parallel
+        Console.WriteLine($"  Processing {totalExperts} experts sequentially...");
 
-        var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxParallelism };
-
-        Parallel.ForEach(expertList, parallelOptions, expert =>
+        foreach (var expert in expertList)
         {
-            // Each thread needs its own EPDRL instance for thread safety
-            var localEpdrl = new EPDRL(_knowledgeGraph, _embeddingDim);
+            // Create EPDRL instance with shared embeddings (avoids Node2Vec retraining)
+            var localEpdrl = new EPDRL(_knowledgeGraph, _embeddingDim, pretrainedEmbeddings: sharedEmbeddings);
             var preferenceGraph = localEpdrl.GeneratePreferenceGraph(expert, episodes);
-            results[expert.Id] = preferenceGraph;
+            _expertPreferenceGraphs[expert.Id] = preferenceGraph;
 
-            var currentCount = Interlocked.Increment(ref count);
+            count++;
 
-            // Progress reporting - thread-safe, less frequent to avoid console contention
-            if (currentCount == 1 || currentCount % 100 == 0 || currentCount == totalExperts)
+            // Progress reporting
+            if (count == 1 || count % 100 == 0 || count == totalExperts)
             {
                 var elapsed = DateTime.Now - startTime;
-                var avgTimePerExpert = elapsed.TotalSeconds / currentCount;
-                var remaining = TimeSpan.FromSeconds(avgTimePerExpert * (totalExperts - currentCount));
-                Console.WriteLine($"  Generated {currentCount}/{totalExperts} graphs ({100.0 * currentCount / totalExperts:F1}%) - ETA: {remaining:mm\\:ss}");
+                var avgTimePerExpert = elapsed.TotalSeconds / count;
+                var remaining = TimeSpan.FromSeconds(avgTimePerExpert * (totalExperts - count));
+                Console.WriteLine($"  Generated {count}/{totalExperts} graphs ({100.0 * count / totalExperts:F1}%) - ETA: {remaining:mm\\:ss}");
                 Console.Out.Flush();
             }
-        });
-
-        // Copy results to main dictionary
-        foreach (var kvp in results)
-        {
-            _expertPreferenceGraphs[kvp.Key] = kvp.Value;
         }
 
         Console.WriteLine($"Generated {count} preference graphs.");
