@@ -17,7 +17,7 @@ This tool processes StackOverflow XML data dumps and generates:
 
 ## Getting the Data
 
-1. Visit [Stack Exchange Data Dump on Archive.org](https://archive.org/details/stackexchange)
+1. Visit [Stack Exchange Data Dump on Archive.org](https://archive.org/download/stackexchange)
 2. Download a data dump (recommended smaller datasets for testing):
    - `softwareengineering.stackexchange.com` (~200MB)
    - `codereview.stackexchange.com` (~150MB)
