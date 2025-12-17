@@ -2,6 +2,7 @@
 using EPANSERec.Core.Models;
 using EPANSERec.Core.Recommendation;
 using EPANSERec.Core.Utils;
+using Microsoft.Extensions.Configuration;
 
 Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
 Console.WriteLine("║  EPAN-SERec: Expertise Preference-Aware Networks for         ║");
@@ -10,34 +11,22 @@ Console.WriteLine("╚═══════════════════�
 Console.WriteLine();
 
 // ============================================================================
-// CONFIGURATION - Toggle between synthetic and real StackOverflow data
+// CONFIGURATION - Load from appsettings.json (edit file to change settings)
 // ============================================================================
-var config = new TrainingConfig
-{
-    // === Data Source (set UseRealData = true to use real StackOverflow data) ===
-    UseRealData = false,                    // Toggle: false = synthetic, true = real data
-    DataPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "data", "stackoverflow"),  // Path to real data (when UseRealData = true)
+var basePath = AppContext.BaseDirectory;
+var configuration = new ConfigurationBuilder()
+    .SetBasePath(basePath)
+    .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+    .Build();
 
-    // === Synthetic Data Settings (only used when UseRealData = false) ===
-    NumExperts = 100,
-    NumQuestions = 500,
-    NumSamples = 3000,
+var config = new TrainingConfig();
+configuration.GetSection("Training").Bind(config);
 
-    // === Model Settings ===
-    EmbeddingDim = 64,                      // 64 for small data, 100+ for large data
-    Beta = 0.1f,                            // SSL loss coefficient
-    UseHierarchicalMI = false,              // Enable for large datasets
+// Resolve DataPath relative to the executable location
+var resolvedDataPath = config.GetResolvedDataPath(basePath);
+config.DataPath = resolvedDataPath;
 
-    // === Training Settings ===
-    Epochs = 100,
-    BatchSize = 32,
-    LearningRate = 5e-4f,
-    TransHEpochs = 100,
-    EPDRLEpisodes = 50,
-    GCNEpochs = 50,
-    EarlyStoppingPatience = 0,  // 0 = disabled (train all epochs), >0 = stop if no improvement for N epochs
-    Seed = 42
-};
+Console.WriteLine("Configuration loaded from appsettings.json");
 
 // Print configuration
 Console.WriteLine("Configuration:");

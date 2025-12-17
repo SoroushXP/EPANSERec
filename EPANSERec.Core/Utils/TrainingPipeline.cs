@@ -149,6 +149,7 @@ public class TrainingPipeline
 
 /// <summary>
 /// Training configuration parameters.
+/// Can be loaded from appsettings.json or created programmatically.
 /// </summary>
 public class TrainingConfig
 {
@@ -208,6 +209,16 @@ public class TrainingConfig
     public int GCNEpochs { get; set; } = 50;
     public int EarlyStoppingPatience { get; set; } = 10;
     public int? Seed { get; set; } = 42;
+
+    /// <summary>
+    /// Resolves the DataPath to an absolute path based on the base directory.
+    /// </summary>
+    public string GetResolvedDataPath(string baseDirectory)
+    {
+        if (Path.IsPathRooted(DataPath))
+            return DataPath;
+        return Path.GetFullPath(Path.Combine(baseDirectory, DataPath));
+    }
 }
 
 /// <summary>
