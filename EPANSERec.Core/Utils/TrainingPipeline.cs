@@ -37,7 +37,7 @@ public class TrainingPipeline
         
         // Step 1: Initialize model
         Console.WriteLine("Step 1: Initializing model...");
-        _model.Initialize(_config.LearningRate);
+        _model.Initialize(_config.LearningRate, _config.WeightDecay);
         
         // Step 2: Pre-train knowledge embeddings
         Console.WriteLine("\nStep 2: Pre-training TransH embeddings...");
@@ -204,6 +204,7 @@ public class TrainingConfig
     public int Epochs { get; set; } = 100;
     public int BatchSize { get; set; } = 128;
     public float LearningRate { get; set; } = 1e-4f;
+    public float WeightDecay { get; set; } = 1e-4f;  // L2 regularization to prevent overfitting
     public int TransHEpochs { get; set; } = 100;
     public int EPDRLEpisodes { get; set; } = 50;
     public int GCNEpochs { get; set; } = 50;

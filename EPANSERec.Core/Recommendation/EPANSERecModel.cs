@@ -88,7 +88,9 @@ public class EPANSERecModel
     /// <summary>
     /// Initializes all model components.
     /// </summary>
-    public void Initialize(float learningRate = 1e-4f)
+    /// <param name="learningRate">Learning rate for optimizer</param>
+    /// <param name="weightDecay">L2 regularization weight decay (default: 1e-4)</param>
+    public void Initialize(float learningRate = 1e-4f, float weightDecay = 1e-4f)
     {
         Console.WriteLine("Initializing EPAN-SERec model components...");
 
@@ -133,9 +135,11 @@ public class EPANSERecModel
             .Concat(_featureFusion.parameters())
             .Concat(_predictionDNN.parameters())
             .Concat(_sslModule.parameters());
-        _optimizer = torch.optim.Adam(parameters, lr: learningRate);
 
-        Console.WriteLine("Model initialization complete.");
+        // Use Adam with weight decay (L2 regularization) to prevent overfitting
+        _optimizer = torch.optim.Adam(parameters, lr: learningRate, weight_decay: weightDecay);
+
+        Console.WriteLine($"Model initialization complete (LR={learningRate}, WeightDecay={weightDecay}).");
     }
 
     /// <summary>
